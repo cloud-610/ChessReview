@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#312E2B">
+<title>棋局评价</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <div class="brand"><span class="brand-icon"></span>棋局评价</div>
+  <nav id="tabs">
+    <button data-view="board" class="active">棋盘</button>
+    <button data-view="review">复盘</button>
+    <button data-view="settings">设置</button>
+  </nav>
+  <div id="engineChip" class="chip">引擎…</div>
+</header>
+
+<main id="views">
+
+  <!-- ============ 棋盘视图（自由对弈 + 实时评价） ============ -->
+  <section id="view-board" class="view active">
+    <div id="boardSlot">
+      <div id="boardArea">
+        <div id="evalBarWrap">
+          <div id="evalBar"><div id="evalBarFill"></div></div>
+          <div id="evalNum">0.0</div>
+        </div>
+        <div id="boardWrap">
+          <div id="board"></div>
+          <svg id="arrowSvg" viewBox="0 0 8 8" preserveAspectRatio="none"></svg>
+          <div id="pieceLayer"></div>
+          <div id="promoLayer" class="hidden"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="boardStatus">
+      <span id="turnTag">白方行棋</span>
+      <span id="engineStatus">引擎…</span>
+    </div>
+
+    <div id="boardTools">
+      <button id="btnUndo" class="tool" title="悔棋">↩</button>
+      <button id="btnFlip" class="tool" title="翻转棋盘">⇅</button>
+      <button id="btnNew" class="tool" title="新对局">✚</button>
+      <button id="btnEnginePlay" class="tool" title="人机对弈">🤖</button>
+      <button id="btnFen" class="tool" title="FEN 局面">FEN</button>
+      <button id="btnImportPgn" class="tool wide" title="导入 PGN 复盘">导入 PGN 复盘</button>
+      <button id="btnExport" class="tool wide" title="导出/分享">导出</button>
+    </div>
+
+    <div id="boardMovesBox">
+      <div class="panel-title">着法 <span class="hint">（实时评价）</span></div>
+      <div id="boardMoves"></div>
+    </div>
+  </section>
+
+  <!-- ============ 复盘视图 ============ -->
+  <section id="view-review" class="view">
+    <div id="reviewIntro">
+      <div class="intro-card">
+        <div class="intro-title">棋局复盘</div>
+        <p>导入一盘 PGN 棋谱（或复盘当前对弈），引擎将对<b>每一步</b>给出评价：
+        妙手 / 好棋 / 正招 / 不错 / 好 / 谱着 / 软招 / 错招 / 失误(漏杀) / 败招 / 被强迫，
+        并生成双方准确率与逐手胜率曲线。</p>
+        <button id="btnImportPgn2" class="btn primary">导入 PGN 开始复盘</button>
+        <button id="btnReviewCurrent" class="btn hidden">复盘当前对弈的对局</button>
+        <button id="btnDemo" class="btn small">载入演示对局（摩菲·歌剧之战）</button>
+      </div>
+    </div>
+
+    <div id="reviewRun" class="hidden">
+      <div class="run-card">
+        <div class="panel-title">引擎分析中</div>
+        <div class="prog-track"><div id="reviewProgressBar" class="prog-fill"></div></div>
+        <div id="reviewProgressText">准备中…</div>
+        <button id="btnReviewCancel" class="btn small">中止分析</button>
+      </div>
+      <div id="reviewMoves"></div>
+    </div>
+
+    <div id="reviewDash" class="hidden"></div>
+
+    <div id="reviewBody" class="hidden">
+      <div id="reviewBoardSlot">
+        <!-- 棋盘区（boardArea 由 JS 移入此处） -->
+      </div>
+
+      <div id="reviewEvalRow">
+        <span id="reviewEvalTag">—</span>
+        <div id="reviewNav">
+          <button id="btnNavFirst" class="tool">⏮</button>
+          <button id="btnNavPrev" class="tool">◀</button>
+          <button id="btnNavNext" class="tool">▶</button>
+          <button id="btnNavLast" class="tool">⏭</button>
+        </div>
+      </div>
+
+      <div id="reviewComment"></div>
+
+      <div id="graphWrap">
+        <div class="panel-title">白方胜率曲线 <span class="hint">（点击跳转）</span></div>
+        <canvas id="graph"></canvas>
+      </div>
+
+      <div id="reviewMovesPanel">
+        <div class="panel-title">着法评价 <span class="hint">（点击跳转）</span></div>
+        <div id="reviewMoves2"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 设置视图 ============ -->
+  <section id="view-settings" class="view">
+    <div id="settingsBody">加载中…</div>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+
+<!-- ============ 对话框 ============ -->
+<div id="dlgPgn" class="dlg">
+  <div class="dlg-card">
+    <div class="dlg-title">导入 PGN</div>
+    <textarea id="pgnText" rows="9" placeholder="粘贴 PGN 棋谱，例如：&#10;[Event &quot;…&quot;]&#10;1. e4 e5 2. Nf3 Nc6 ..."></textarea>
+    <div class="dlg-actions">
+      <button id="btnPgnFromFile" class="btn small">从文件打开</button>
+      <button data-close="dlgPgn" class="btn small">取消</button>
+      <button id="btnPgnStart" class="btn primary">开始复盘</button>
+    </div>
+  </div>
+</div>
+
+<div id="dlgFen" class="dlg">
+  <div class="dlg-card">
+    <div class="dlg-title">FEN 局面</div>
+    <input id="fenInput" type="text" spellcheck="false">
+    <div class="dlg-actions">
+      <button data-close="dlgFen" class="btn small">取消</button>
+      <button id="btnFenLoad" class="btn primary">载入局面</button>
+    </div>
+  </div>
+</div>
+
+<div id="dlgEngine" class="dlg">
+  <div class="dlg-card">
+    <div class="dlg-title">人机对弈</div>
+    <div class="dlg-row">
+      <label>引擎执子</label>
+      <div class="seg">
+        <label class="seg-item"><input type="radio" name="engineSide" value="b" checked><span>黑方</span></label>
+        <label class="seg-item"><input type="radio" name="engineSide" value="w"><span>白方</span></label>
+      </div>
+    </div>
+    <div class="dlg-row">
+      <label>棋力等级</label>
+      <select id="engineLevel">
+        <option value="1">1 · 入门</option>
+        <option value="2">2 · 新手</option>
+        <option value="3">3 · 业余</option>
+        <option value="4" selected>4 · 俱乐部</option>
+        <option value="5">5 · 进阶</option>
+        <option value="6">6 · 高手</option>
+        <option value="7">7 · 大师</option>
+        <option value="8">8 · 宗师</option>
+      </select>
+    </div>
+    <div id="engineLevelDesc" class="dlg-note"></div>
+    <div class="dlg-actions">
+      <button id="btnEngineStop" class="btn small">退出人机</button>
+      <button data-close="dlgEngine" class="btn small">取消</button>
+      <button id="btnEngineStart" class="btn primary">开始对弈</button>
+    </div>
+  </div>
+</div>
+
+<div id="dlgConfirm" class="dlg">
+  <div class="dlg-card">
+    <div id="confirmText" class="dlg-note"></div>
+    <div class="dlg-actions">
+      <button id="confirmNo" class="btn small">取消</button>
+      <button id="confirmYes" class="btn primary">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="core-chess.js"></script>
+<script src="book.js"></script>
+<script src="engine-bridge.js"></script>
+<script src="review.js"></script>
+<script src="ui.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
