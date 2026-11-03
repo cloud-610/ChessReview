@@ -71,25 +71,24 @@ var REVIEW = {};
     }
   }
 
-  /* ---- 弃子检测（妙手）：走后按引擎主线推 2 步，行棋方子力净损 ---- */
+  /* ---- 弃子检测（妙手）：双方子力差口径（v1.0.3 重写） ----
+   * 走子后沿引擎主线推演对方的最佳应手，比较前后「我方-对方」子力差：
+   *   等价交换（车换车）：差值不变 → 不算弃子；
+   *   以小换大（马换车）：差值上升 → 不算弃子；
+   *   真弃子（象换兵 / 后换马等有目的地以大换小）：差值下降 → 弃子。 */
   function sacrificeValue(nodeBefore, nodeAfter, moverBlack) {
     try {
+      var posB = new Position(nodeBefore.fen);
+      var bal0 = materialOf(posB, moverBlack) - materialOf(posB, !moverBlack);
       var pos = new Position(nodeAfter.fen);
-      var matBefore = materialOf(new Position(nodeBefore.fen), moverBlack);
-      var matNow = materialOf(pos, moverBlack);
-      if (matNow >= matBefore) return 0; // 没有子力损失
-      // 沿 nodeAfter 的主线（对方最佳 + 我方应手）推演
       var pv = nodeAfter.pv1 || [];
-      var applied = 0;
-      for (var i = 0; i < Math.min(2, pv.length); i++) {
-        var mv = uciToMove(pos, pv[i]);
-        if (!mv) break;
-        pos.make(mv);
-        applied++;
+      if (pv.length) {
+        var mv = uciToMove(pos, pv[0]);
+        if (mv) pos.make(mv);
       }
-      var matAfter = materialOf(pos, moverBlack);
-      var lost = matBefore - matAfter;
-      return lost > 0 ? lost : 0;
+      var bal1 = materialOf(pos, moverBlack) - materialOf(pos, !moverBlack);
+      var sac = bal0 - bal1;
+      return sac >= 1.5 ? sac : 0;
     } catch (e) {
       return 0;
     }
@@ -126,11 +125,15 @@ var REVIEW = {};
       (winA >= winB - 0.25);
     var legalCount = before.legalCount || 0;
 
-    // 被强迫：唯一合法着法；或决定性局面中各着法几乎等价（无实际选择）
-    var forced = legalCount === 1 ||
-      (spread !== null && spread < 2 && loss < 5 && (winB >= 90 || winB <= 10));
-    // 谱着
-    var bookName = bookLookup(uciSeqPrefix) || null;
+    // 被强迫：唯一合法着法（只能这么走，其他走法都不合法）
+    var forced = legalCount === 1;
+    // 谱着：在线开局库优先（有数据时以其为准），离线/无数据时本地库兜底
+    var bookName;
+    var onlineName = (typeof BookOnline !== 'undefined' && before.bookOnline)
+      ? BookOnline.lookup(before.bookOnline, playedUci) : null;
+    if (onlineName) bookName = onlineName;
+    else if (onlineName === '') bookName = null; // 在线库确认非谱着，不再回退本地
+    else bookName = bookLookup(uciSeqPrefix) || null;
     // 失误（漏杀）
     var hadWin = false;
     if (before.analyzed) {
@@ -140,11 +143,12 @@ var REVIEW = {};
     }
     var missed = hadWin && winA <= 85 && !isBest && loss >= 5;
 
-    // 妙手：最佳 + 有效弃子 + 保持优势
+    // 妙手：弃子 + 引擎最佳，且（唯一好棋 或 保持优势/存在杀棋）
     var brilliant = false, sacVal = 0;
     if (isBest) {
       sacVal = sacrificeValue(before, after, moverBlack);
-      brilliant = sacVal >= 1.5 && (winA >= 55 || (before.mate1 !== null && before.mate1 > 0));
+      var onlyGood = spread !== null && spread >= 12;
+      brilliant = sacVal >= 1.5 && (onlyGood || winA >= 55 || (before.mate1 !== null && before.mate1 > 0));
     }
 
     var cls;
@@ -190,7 +194,7 @@ var REVIEW = {};
     var bestSan = m.bestSan || '';
     var t = '';
     switch (m.cls) {
-      case 'forced': t = '被强迫 —— 几乎没有别的选择。'; break;
+      case 'forced': t = '被强迫 —— 唯一合法着法。'; break;
       case 'book': t = '谱着 · ' + (m.bookName || '开局理论') + '。'; break;
       case 'brilliant': t = '妙手！弃掉约 ' + m.sac.toFixed(1) + ' 子换取攻势/优势，引擎确认这是最佳。'; break;
       case 'great': t = '好棋！几乎是唯一的好着（次佳着法胜率要低 ' + Math.round(m.spread || 0) + '%）。'; break;
@@ -263,6 +267,7 @@ var REVIEW = {};
         var node = nodes[idx];
         var useCache = cache[node.fen];
         if (useCache && useCache.analyzed) {
+          node.bookOnline = useCache.bookOnline || null;
           fillNode(node, {
             cp1: useCache.cp1, mate1: useCache.mate1, best: useCache.best1, pv1: useCache.pv1,
             depth1: useCache.depth1, cp2: useCache.cp2, mate2: useCache.mate2,
@@ -271,11 +276,17 @@ var REVIEW = {};
           afterNode();
           return;
         }
+        // 在线开局库与引擎分析并行（仅开局阶段；失败/超时自动回退本地库）
+        var bookPromise = (typeof BookOnline !== 'undefined' && BookOnline.enabled && idx < BookOnline.MAX_PLY)
+          ? BookOnline.get(node.fen) : Promise.resolve(null);
         Engine.analyze(node.fen, { depth: depth }).then(function (res) {
-          if (opts.cancel && opts.cancel()) { finish(false); return; }
-          fillNode(node, res);
-          cache[node.fen] = node;
-          afterNode();
+          return bookPromise.then(function (bo) {
+            if (opts.cancel && opts.cancel()) { finish(false); return; }
+            fillNode(node, res);
+            node.bookOnline = bo;
+            cache[node.fen] = node;
+            afterNode();
+          });
         }).catch(function (e) {
           if (e && e.stale) {
             // 被其它搜索取代：稍后重试当前节点
@@ -388,6 +399,7 @@ var REVIEW = {};
   REVIEW.makeNode = makeNode;
   REVIEW.fillNode = fillNode;
   REVIEW.classifyMove = classifyMove;
+  REVIEW.sacrificeValue = sacrificeValue;
   REVIEW.runReview = runReview;
   REVIEW.accuracyOf = accuracyOf;
   REVIEW.moveComment = moveComment;

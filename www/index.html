@@ -44,6 +44,10 @@
     </div>
 
     <div id="boardTools">
+      <button id="btnBFirst" class="tool" title="回到开局">⏮</button>
+      <button id="btnBPrev" class="tool" title="上一步">◀</button>
+      <button id="btnBNext" class="tool" title="下一步">▶</button>
+      <button id="btnBLast" class="tool" title="最新局面">⏭</button>
       <button id="btnUndo" class="tool" title="悔棋">↩</button>
       <button id="btnFlip" class="tool" title="翻转棋盘">⇅</button>
       <button id="btnNew" class="tool" title="新对局">✚</button>
@@ -114,9 +118,61 @@
     </div>
   </section>
 
-  <!-- ============ 设置视图 ============ -->
+  <!-- ============ 设置视图（v1.0.3：静态 HTML，不再由 JS 动态生成，杜绝动态渲染失败导致打不开） ============ -->
   <section id="view-settings" class="view">
-    <div id="settingsBody">加载中…</div>
+    <div id="settingsBody">
+      <div class="set-card">
+        <div class="sec-title">引擎</div>
+        <div class="set-row"><label>实时评价</label><select id="setLive">
+          <option value="1">开启（走子后立即评估）</option>
+          <option value="0">关闭</option>
+        </select></div>
+        <div class="set-row"><label>在线开局库</label><select id="setOnlineBook">
+          <option value="1">开启（lichess 开局数据库）</option>
+          <option value="0">关闭（仅本地库）</option>
+        </select></div>
+        <div class="set-note">谱着判定优先查询 lichess 在线开局库（会把局面 FEN 发送到 lichess.org），离线或超时自动回退本地库。</div>
+        <div class="set-row"><label>实时分析深度</label><select id="setLiveDepth">
+          <option value="10">10（快）</option><option value="12">12（快）</option>
+          <option value="13">13（均衡）</option><option value="14">14（均衡）</option>
+          <option value="16">16（慢而准）</option><option value="18">18（慢而准）</option>
+        </select></div>
+        <div class="set-row"><label>复盘深度</label><select id="setReviewDepth">
+          <option value="12">12（快速）</option><option value="14">14（快速）</option>
+          <option value="16">16（标准）</option><option value="18">18（深度）</option>
+          <option value="20">20（极深·耗时长）</option><option value="22">22（极深·耗时长）</option>
+          <option value="24">24（极深·耗时长）</option>
+        </select></div>
+        <div class="set-row"><label>置换表内存</label><select id="setHash">
+          <option value="64">64 MB</option><option value="128">128 MB</option>
+          <option value="256">256 MB</option><option value="512">512 MB</option>
+        </select></div>
+      </div>
+      <div class="set-card">
+        <div class="sec-title">鳕鱼引擎模型（NNUE）</div>
+        <div id="modelsBody">（打开时加载）</div>
+        <div class="set-row"><label>自定义模型 URL</label><input id="modelUrl" type="url" placeholder="https://.../nn-xxxx.nnue"></div>
+        <button class="btn small" id="btnModelDownload">下载模型</button>
+      </div>
+      <div class="set-card">
+        <div class="sec-title">应用更新</div>
+        <div class="set-row"><label>当前版本</label><span id="setVersion">v1.0.3</span></div>
+        <div class="set-row"><label>版本清单 URL</label><input id="manifestUrl" type="url" placeholder="https://.../update.json"></div>
+        <button class="btn small" id="btnUpdateCheck">检查更新</button>
+        <div id="updateResult" class="set-note"></div>
+        <div class="set-row"><label>直接安装 APK</label><input id="apkUrl" type="url" placeholder="https://.../ChessReview.apk"></div>
+        <button class="btn small" id="btnUpdateInstall">下载并安装</button>
+      </div>
+      <div class="set-card">
+        <div class="sec-title">关于</div>
+        <div class="set-note">本应用内置 Stockfish 引擎（GPLv3 开源许可，见 stockfishchess.org）。评价体系参照 chess.com 棋局复盘逻辑（胜率换算公式一致，分类阈值为社区逆向近似值）。</div>
+        <button class="btn small" id="btnGpl">查看开源许可</button>
+      </div>
+      <div class="set-card">
+        <div class="sec-title">诊断信息</div>
+        <div id="diagBody" class="set-note">—</div>
+      </div>
+    </div>
   </section>
 </main>
 

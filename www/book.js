@@ -86,8 +86,104 @@ function bookLookup(uciSeq) {
   return null;
 }
 
+/* =========================================================================
+ * 在线开局库 —— lichess 开局浏览器（explorer.lichess.ovh）
+ * 谱着判定优先级：在线数据库 > 本地开局库；离线/超时/失败自动回退本地库。
+ * 查询结果按 FEN 缓存；仅开局阶段（前 MAX_PLY 个局面）查询。
+ * ========================================================================= */
+function httpGetText(url) {
+  if (typeof window !== 'undefined' && window.Android && window.Android.httpGet) {
+    // Android：经 Java 桥（无 CORS 限制）
+    return new Promise(function (resolve) {
+      var id = 'bk' + (++BookOnline._seq);
+      BookOnline._pending[id] = resolve;
+      try { window.Android.httpGet(url, id); }
+      catch (e) { delete BookOnline._pending[id]; resolve(null); }
+    });
+  }
+  // 浏览器模式回退：XMLHttpRequest（lichess API 允许跨域）
+  return new Promise(function (resolve) {
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, true);
+      xhr.onload = function () { resolve(xhr.status === 200 ? xhr.responseText : null); };
+      xhr.onerror = function () { resolve(null); };
+      xhr.ontimeout = function () { resolve(null); };
+      xhr.onabort = function () { resolve(null); };
+      xhr.timeout = 6000;
+      xhr.send();
+    } catch (e) { resolve(null); }
+  });
+}
+
+var BookOnline = {
+  enabled: true,
+  MAX_PLY: 40,        // 仅开局阶段查询（前 40 个局面）
+  TIMEOUT: 5000,      // 单次查询超时（毫秒）
+  MIN_GAMES: 5,       // 在线库中该着法至少出现过的对局数
+  _cache: {},         // fen -> Promise<result|null>
+  _seq: 0,
+  _pending: {},       // cbId -> resolve（Android 桥回调）
+
+  get: function (fen) {
+    if (!fen) return Promise.resolve(null);
+    if (this._cache[fen] !== undefined) return this._cache[fen];
+    var p = this._fetch(fen);
+    this._cache[fen] = p;
+    return p;
+  },
+
+  _fetch: function (fen) {
+    var self = this;
+    return new Promise(function (resolve) {
+      var settled = false;
+      function finish(v) { if (!settled) { settled = true; resolve(v); } }
+      var timer = setTimeout(function () { finish(null); }, self.TIMEOUT);
+      var url = 'https://explorer.lichess.ovh/lichess?fen=' + encodeURIComponent(fen) +
+        '&moves=12&topGames=0&recentGames=0' +
+        '&speeds=blitz,rapid,classical,correspondence&ratings=1600,1800,2000,2200,2500';
+      httpGetText(url).then(function (text) {
+        clearTimeout(timer);
+        if (!text) { finish(null); return; }
+        try {
+          var j = JSON.parse(text);
+          var moves = [];
+          var arr = j.moves || [];
+          for (var i = 0; i < arr.length; i++) {
+            moves.push({ uci: arr[i].uci, games: arr[i].games || 0 });
+          }
+          var name = '';
+          if (j.opening && j.opening.name) {
+            name = (j.opening.eco ? j.opening.eco + ' ' : '') + j.opening.name;
+          }
+          finish({ ok: true, moves: moves, name: name });
+        } catch (e) { finish(null); }
+      }).catch(function () { clearTimeout(timer); finish(null); });
+    });
+  },
+
+  /* 命中判定：返回开局名（命中）/ ''（在线库有数据但该着法非谱着）/ null（在线库不可用→本地兜底） */
+  lookup: function (bookOnline, playedUci) {
+    if (!bookOnline || !bookOnline.ok || !bookOnline.moves || !bookOnline.moves.length) return null;
+    for (var i = 0; i < bookOnline.moves.length; i++) {
+      var m = bookOnline.moves[i];
+      if (m.uci === playedUci && m.games >= this.MIN_GAMES) {
+        return bookOnline.name || '在线开局库';
+      }
+    }
+    return '';
+  }
+};
+
+window.Bridge = window.Bridge || {};
+window.Bridge.httpDone = function (cbId, ok, body) {
+  var r = BookOnline._pending[cbId];
+  if (r) { delete BookOnline._pending[cbId]; r(ok ? body : null); }
+};
+
 if (typeof window !== 'undefined') {
   window.BOOK_LINES = BOOK_LINES;
   window.BOOK_SET = BOOK_SET;
   window.bookLookup = bookLookup;
+  window.BookOnline = BookOnline;
 }

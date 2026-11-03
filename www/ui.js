@@ -317,6 +317,8 @@ var UI = {
       if (t) t.classList.add('last-to');
     }
     this._lastMove = opts.lastMove || null;
+    // 落子格右上角小徽章（当前步评价；原有着法列表/评注框徽章保持不变）
+    this.setBoardBadge(opts.badge ? opts.badge.sq : null, opts.badge ? opts.badge.cls : null);
     // 检查指示
     document.querySelectorAll('.sq.check-hint').forEach(function (el) { el.classList.remove('check-hint'); });
     if (pos.inCheck()) {
@@ -330,6 +332,26 @@ var UI = {
     this.orientation = this.orientation === 'w' ? 'b' : 'w';
     this._buildSquares();
     this.renderBoard(this.controller.getPosition().fen(), { lastMove: this._lastMove });
+  },
+
+  /* ---------------- 棋盘落子格右上角小徽章 ---------------- */
+  boardBadgeHtml: function (cls) {
+    var info = REVIEW.CLS_INFO[cls] || REVIEW.CLS_INFO.unknown;
+    var icon;
+    if (['!!', '!', '?!', '?', '??'].indexOf(info.icon) >= 0) icon = info.icon;
+    else if (UI.BADGE_ICON[info.icon]) icon = UI.BADGE_ICON[info.icon];
+    else icon = '';
+    return '<span class="badge sq-badge b-' + cls + '">' + icon + '</span>';
+  },
+
+  setBoardBadge: function (sq, cls) {
+    var board = this.els && this.els.board;
+    if (!board) return;
+    var old = board.querySelectorAll('.sq-badge');
+    for (var i = 0; i < old.length; i++) old[i].remove();
+    if (sq == null || sq < 0 || !cls || cls === 'unknown') return;
+    var sqEl = this._sqEl(sq);
+    if (sqEl) sqEl.insertAdjacentHTML('beforeend', this.boardBadgeHtml(cls));
   },
 
   /* ---------------- 箭头 ---------------- */
@@ -440,8 +462,15 @@ var UI = {
       table.appendChild(row);
     }
     container.appendChild(table);
+    // 只滚动着法列表自身容器，不带动整页滚动（修复跳步时屏幕强制移动/跳底）
     var cur = container.querySelector('.mv.cur');
-    if (cur) cur.scrollIntoView({ block: 'nearest' });
+    var wrap = container.querySelector('.mrow-wrap');
+    if (cur && wrap) {
+      var top = cur.offsetTop, h = cur.offsetHeight;
+      if (top < wrap.scrollTop || top + h > wrap.scrollTop + wrap.clientHeight) {
+        wrap.scrollTop = top + h / 2 - wrap.clientHeight / 2;
+      }
+    }
   },
 
   /* ---------------- 胜率图 ---------------- */

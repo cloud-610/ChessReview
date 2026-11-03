@@ -24,9 +24,10 @@ var App = {
 var DEFAULT_SETTINGS = {
   threads: 0,          // 0=自动
   hash: 128,
-  reviewDepth: 16,
+  reviewDepth: 18,
   liveDepth: 13,
   liveOn: 1,
+  onlineBook: 1,       // 在线开局库（lichess 开局浏览器）
   manifestUrl: 'https://example.com/chessreview/update.json'
 };
 
@@ -35,6 +36,13 @@ function loadSettings() {
     var raw = window.Android ? window.Android.prefGet('settings') : (localStorage.getItem('settings') || '');
     App.settings = Object.assign({}, DEFAULT_SETTINGS, raw ? JSON.parse(raw) : {});
   } catch (e) { App.settings = Object.assign({}, DEFAULT_SETTINGS); }
+  // v1.0.2 迁移：旧版本无 onlineBook；未自定义复盘深度时提升到 18
+  var migrated = false;
+  if (App.settings.onlineBook === undefined) { App.settings.onlineBook = 1; migrated = true; }
+  if (migrated && (App.settings.reviewDepth === 16 || App.settings.reviewDepth === undefined)) {
+    App.settings.reviewDepth = 18;
+  }
+  if (migrated) saveSettings();
 }
 function saveSettings() {
   var raw = JSON.stringify(App.settings);
@@ -56,6 +64,7 @@ function newGame(fen) {
   App.gameMeta = [];
   App.lastNodeAnalysis = null;
   App.enginePlay = null;
+  App.navIdx = 0;
   resetLiveState();
   if (App.review) { App.review = null; }
   refreshBoardView();
@@ -66,6 +75,8 @@ function gameToStart() {
   App.pos = new Position(App.game.startFen);
   App.game.ucis = []; App.game.sans = []; App.game.fenHistory = [App.pos.positionKey()];
   App.gameMeta = [];
+  App.navIdx = 0;
+  App._badgeQueue = [];
   refreshBoardView();
   autoSave();
 }
@@ -79,10 +90,20 @@ function replayTo(idx) {
     pos.make(mv);
   }
   App.pos = pos;
+  App.navIdx = idx;
 }
 
 function applyMove(mv) {
   var before = App.pos;
+  // 从历史局面走子：截断其后着法，从当前局面分叉新变化（v1.0.3）
+  if (App.navIdx != null && App.game && App.game.ucis.length > App.navIdx) {
+    App.game.ucis = App.game.ucis.slice(0, App.navIdx);
+    App.game.sans = App.game.sans.slice(0, App.navIdx);
+    App.gameMeta = App.gameMeta.slice(0, App.navIdx);
+    App.game.fenHistory = App.game.fenHistory.slice(0, App.navIdx + 1);
+    App._badgeQueue = App._badgeQueue.filter(function (b) { return b.idx < App.navIdx; });
+    try { UI.toast('已截断后续着法，从第 ' + (App.navIdx + 1) + ' 手分叉新变化'); } catch (e) {}
+  }
   var fenBefore = before.fen();
   var uci = moveToUci(mv);
   var san = before.san(mv);
@@ -94,6 +115,7 @@ function applyMove(mv) {
   App.game.fenHistory.push(before.positionKey());
   var meta = { uci: uci, san: san, cls: null };
   App.gameMeta.push(meta);
+  App.navIdx = App.game.ucis.length;
 
   // 终局检测
   var status = gameStatus(before, App.game.fenHistory);
@@ -151,6 +173,7 @@ function undoMove() {
   App.game.ucis = App.game.ucis.slice(0, App.game.ucis.length - n);
   App.game.sans = App.game.sans.slice(0, App.game.sans.length - n);
   App.gameMeta = App.gameMeta.slice(0, App.gameMeta.length - n);
+  App._badgeQueue = App._badgeQueue.filter(function (b) { return b.idx < App.game.ucis.length; });
   replayTo(App.game.ucis.length);
   App.game.result = '*';
   refreshBoardView();
@@ -193,19 +216,28 @@ function classifyPair(nb, na, meta, moveIdx) {
 }
 
 function processBadges() {
-  if (!App._badgeQueue.length) return;
-  var kept = [];
+  // 保留全部条目：在线开局库异步到达后可重新结算（谱着补判）
   for (var i = 0; i < App._badgeQueue.length; i++) {
     var b = App._badgeQueue[i];
     var nb = App._nodeCache[b.fenBefore];
     var na = App._nodeCache[b.fenAfter];
     if (nb && nb.analyzed && na && na.analyzed) {
       classifyPair(nb, na, b.meta, b.idx);
-    } else {
-      kept.push(b);
     }
   }
-  App._badgeQueue = kept;
+}
+
+/* 在线开局库附加（实时对弈的谱着判定；复盘流程在 review.js 内并行查询） */
+function attachOnlineBook(node, fen) {
+  if (typeof BookOnline === 'undefined' || !BookOnline.enabled) return;
+  if (!App.game || App.game.ucis.length > BookOnline.MAX_PLY) return;
+  BookOnline.get(fen).then(function (bo) {
+    if (bo && bo.moves && bo.moves.length) {
+      node.bookOnline = bo;
+      processBadges();
+      renderBoardMoveList();
+    }
+  });
 }
 
 function renderLiveNode(node) {
@@ -254,6 +286,7 @@ function livePump() {
       if (App.pos && target === App.pos.fen()) renderLiveNode(node);
       processBadges();
       renderBoardMoveList();
+      attachOnlineBook(node, target);
     }
     setTimeout(livePump, 30);
   }).catch(function () {
@@ -314,17 +347,13 @@ function engineMove() {
 function refreshBoardView() {
   if (!App.pos) return;
   var last = null;
-  if (App.game.ucis.length) {
-    var p = new Position(App.game.startFen);
-    for (var i = 0; i < App.game.ucis.length - 1; i++) {
-      var mv = uciToMove(p, App.game.ucis[i]);
-      if (mv) p.make(mv);
-    }
-    var lastUci = App.game.ucis[App.game.ucis.length - 1];
-    var lm = lastUci ? { from: nameToSq(lastUci.slice(0, 2)), to: nameToSq(lastUci.slice(2, 4)) } : null;
-    last = lm;
+  var navN = (App.navIdx != null) ? App.navIdx : App.game.ucis.length;
+  if (navN > 0 && App.game.ucis.length >= navN) {
+    var lastUci = App.game.ucis[navN - 1];
+    if (lastUci) last = { from: nameToSq(lastUci.slice(0, 2)), to: nameToSq(lastUci.slice(2, 4)) };
   }
   UI.renderBoard(App.pos.fen(), { lastMove: last });
+  updateBoardBadge();
   renderBoardMoveList();
   updateTurnTag();
   if (App.lastNodeAnalysis && App.lastNodeAnalysis.fen === App.pos.fen()) {
@@ -340,11 +369,35 @@ function renderBoardMoveList() {
   var moves = App.gameMeta.map(function (m) {
     return { san: m.san, cls: m.cls };
   });
-  UI.renderMoveList(container, moves, moves.length ? moves.length - 1 : -1, function (j) {
+  var cur = (App.navIdx != null ? App.navIdx : moves.length) - 1;
+  UI.renderMoveList(container, moves, cur, function (j) {
     // 棋盘视图点着法：跳回该局面
     replayTo(j + 1);
     refreshBoardView();
   });
+  updateBoardBadge();
+}
+
+/* 棋盘小徽章：当前所看那一手的评价，显示在落子格右上角（原有着法列表徽章保持不变） */
+function updateBoardBadge() {
+  if (App.view !== 'board') return;
+  var n = (App.navIdx != null) ? App.navIdx : (App.game ? App.game.ucis.length : 0);
+  var meta = (App.gameMeta && n > 0) ? App.gameMeta[n - 1] : null;
+  if (meta && meta.cls && meta.cls !== 'unknown' && meta.uci) {
+    UI.setBoardBadge(nameToSq(meta.uci.slice(2, 4)), meta.cls);
+  } else {
+    UI.setBoardBadge(null);
+  }
+}
+
+/* 棋盘视图步进导航（v1.0.3）：⏮ ◀ ▶ ⏭ 按钮与着法列表点击共用 */
+function gotoBoardPly(n) {
+  if (!App.game) return;
+  var max = App.game.ucis.length;
+  n = Math.max(0, Math.min(max, n));
+  if (n === App.navIdx && App.pos) { refreshBoardView(); return; }
+  replayTo(n);
+  refreshBoardView();
 }
 
 function updateTurnTag(status) {
@@ -365,25 +418,29 @@ function updateTurnTag(status) {
 
 /* ---------------- 视图切换 ---------------- */
 function switchView(v) {
-  App.view = v;
-  document.querySelectorAll('#tabs button').forEach(function (b) {
-    b.classList.toggle('active', b.dataset.view === v);
-  });
-  document.querySelectorAll('.view').forEach(function (s) {
-    s.classList.toggle('active', s.id === 'view-' + v);
-  });
-  // 棋盘在棋盘视图与复盘视图间共享
-  var area = document.getElementById('boardArea');
-  if (v === 'review') {
-    var slot = document.getElementById('reviewBoardSlot');
-    if (slot && area.parentElement.id !== 'reviewBoardSlot') slot.appendChild(area);
-    renderReviewView();
-  } else {
-    var slot2 = document.getElementById('boardSlot');
-    if (slot2 && area.parentElement.id !== 'boardSlot') slot2.appendChild(area);
-    refreshBoardView();
+  try {
+    App.view = v;
+    document.querySelectorAll('#tabs button').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.view === v);
+    });
+    document.querySelectorAll('.view').forEach(function (s) {
+      s.classList.toggle('active', s.id === 'view-' + v);
+    });
+    // 棋盘在棋盘视图与复盘视图间共享
+    var area = document.getElementById('boardArea');
+    if (v === 'review') {
+      var slot = document.getElementById('reviewBoardSlot');
+      if (slot && area.parentElement.id !== 'reviewBoardSlot') slot.appendChild(area);
+      renderReviewView();
+    } else {
+      var slot2 = document.getElementById('boardSlot');
+      if (slot2 && area.parentElement.id !== 'boardSlot') slot2.appendChild(area);
+      refreshBoardView();
+    }
+    if (v === 'settings') renderSettingsView();
+  } catch (e) {
+    try { UI.toast('打开页面出错：' + (e && e.message), false); } catch (e2) {}
   }
-  if (v === 'settings') renderSettingsView();
 }
 
 /* ---------------- 复盘流程 ---------------- */
@@ -407,6 +464,7 @@ function startReview(gameData, depth) {
   txt.textContent = '正在启动引擎分析…';
 
   var cache = {};
+  if (typeof BookOnline !== 'undefined') BookOnline.enabled = App.settings.onlineBook !== 0;
   REVIEW.runReview(gameData, {
     depth: depth || App.settings.reviewDepth,
     cache: cache,
@@ -508,12 +566,16 @@ function renderReviewPosition() {
   if (!r) return;
   var node = r.nodes[App.reviewIdx];
   if (!node) return;
-  var last = null;
+  var last = null, badge = null;
   if (App.reviewIdx > 0) {
     var prevUci = r.ucis[App.reviewIdx - 1];
     last = { from: nameToSq(prevUci.slice(0, 2)), to: nameToSq(prevUci.slice(2, 4)) };
+    var pm = r.moves[App.reviewIdx - 1];
+    if (pm && pm.cls && pm.cls !== 'unknown') {
+      badge = { sq: nameToSq(prevUci.slice(2, 4)), cls: pm.cls };
+    }
   }
-  UI.renderBoard(node.fen, { lastMove: last });
+  UI.renderBoard(node.fen, { lastMove: last, badge: badge });
   // 评估条：该局面引擎评估
   var pct = REVIEW.nodeWinPct(node);
   UI.renderEvalBar(pct, node.analyzed ? REVIEW.evalStr(node) : '', false);
@@ -608,84 +670,121 @@ function restoreGame() {
       result: data.result || '*', fenHistory: []
     };
     App.pos = pos;
+    App.navIdx = data.ucis.length;
     App.gameMeta = App.game.sans.map(function (s) { return { san: s, cls: null }; });
     return true;
   } catch (e) { return false; }
 }
 
-/* ---------------- 设置视图 ---------------- */
+/* ---------------- 设置视图（v1.0.3：静态 HTML，见 index.html；此处只同步数值） ----------------
+ * 根治「设置无法打开」：页面骨架不再由 JS 动态生成，任何一步同步失败都不影响设置页显示；
+ * 事件在 boot 时一次性绑定（bindSettingsEvents），不再每次打开重建。 */
 function renderSettingsView() {
-  var el = document.getElementById('settingsBody');
-  if (!el) return;
-  var s = App.settings;
-  el.innerHTML =
-    '<div class="set-card"><div class="sec-title">引擎</div>' +
-    '<div class="set-row"><label>实时评价</label><select id="setLive">' +
-    '<option value="1"' + (s.liveOn ? ' selected' : '') + '>开启（走子后立即评估）</option>' +
-    '<option value="0"' + (!s.liveOn ? ' selected' : '') + '>关闭</option></select></div>' +
-    '<div class="set-row"><label>实时分析深度</label><select id="setLiveDepth">' +
-    [10, 12, 13, 14, 16, 18].map(function (d) { return '<option value="' + d + '"' + (s.liveDepth === d ? ' selected' : '') + '>' + d + '（' + (d <= 12 ? '快' : d <= 14 ? '均衡' : '慢而准') + '）</option>'; }).join('') +
-    '</select></div>' +
-    '<div class="set-row"><label>复盘深度</label><select id="setReviewDepth">' +
-    [12, 14, 16, 18, 20, 22].map(function (d) { return '<option value="' + d + '"' + (s.reviewDepth === d ? ' selected' : '') + '>' + d + '（' + (d <= 14 ? '快速' : d === 16 ? '标准' : d <= 18 ? '深度' : '极深·耗时长') + '）</option>'; }).join('') +
-    '</select></div>' +
-    '<div class="set-row"><label>置换表内存</label><select id="setHash">' +
-    [64, 128, 256, 512].map(function (d) { return '<option value="' + d + '"' + (s.hash === d ? ' selected' : '') + '>' + d + ' MB</option>'; }).join('') +
-    '</select></div></div>' +
-    '<div class="set-card" id="modelsCard"><div class="sec-title">鳕鱼引擎模型（NNUE）</div><div id="modelsBody">加载中…</div>' +
-    '<div class="set-row"><label>自定义模型 URL</label><input id="modelUrl" type="url" placeholder="https://.../nn-xxxx.nnue"></div>' +
-    '<button class="btn small" id="btnModelDownload">下载模型</button></div>' +
-    '<div class="set-card"><div class="sec-title">应用更新</div>' +
-    '<div class="set-row"><label>当前版本</label><span>v' + ((window.Android ? window.Android.appVersion() : '1.0.0（浏览器测试）')) + '</span></div>' +
-    '<div class="set-row"><label>版本清单 URL</label><input id="manifestUrl" type="url" value="' + esc(s.manifestUrl) + '"></div>' +
-    '<button class="btn small" id="btnUpdateCheck">检查更新</button>' +
-    '<div id="updateResult" class="set-note"></div>' +
-    '<div class="set-row"><label>直接安装 APK</label><input id="apkUrl" type="url" placeholder="https://.../ChessReview.apk"></div>' +
-    '<button class="btn small" id="btnUpdateInstall">下载并安装</button></div>' +
-    '<div class="set-card"><div class="sec-title">关于</div>' +
-    '<div class="set-note">本应用内置 Stockfish 引擎（GPLv3 开源许可，见 stockfishchess.org）。' +
-    '评价体系参照 chess.com 棋局复盘逻辑（胜率换算公式一致，分类阈值为社区逆向近似值）。</div>' +
-    '<button class="btn small" id="btnGpl">查看开源许可</button></div>';
+  try { syncSettingsView(); } catch (e) {
+    try { UI.toast('设置同步出错：' + (e && e.message), false); } catch (e2) {}
+  }
+}
 
-  // 事件绑定
-  el.querySelector('#setLive').addEventListener('change', function () {
+function syncSettingsView() {
+  var s = App.settings;
+  function setVal(id, v) {
+    try { var e = document.getElementById(id); if (e) e.value = String(v); } catch (e2) {}
+  }
+  setVal('setLive', s.liveOn ? '1' : '0');
+  setVal('setOnlineBook', s.onlineBook === 0 ? '0' : '1');
+  setVal('setLiveDepth', s.liveDepth);
+  setVal('setReviewDepth', s.reviewDepth);
+  setVal('setHash', s.hash);
+  try { var mu = document.getElementById('manifestUrl'); if (mu) mu.value = s.manifestUrl || ''; } catch (e) {}
+  try {
+    var ver = document.getElementById('setVersion');
+    if (ver) ver.textContent = window.Android ? ('v' + window.Android.appVersion()) : 'v1.0.3（浏览器测试）';
+  } catch (e) {}
+  renderModelsList();
+  try { renderDiag(); } catch (e) {}
+}
+
+/* 诊断信息：WebView 版本 / 引擎状态 / 近期脚本错误（配合 boot 的错误记录） */
+function renderDiag() {
+  var el = document.getElementById('diagBody');
+  if (!el) return;
+  var lines = [];
+  try { lines.push('WebView: ' + navigator.userAgent.slice(0, 72)); } catch (e) {}
+  try {
+    if (window.Android) lines.push('Android SDK: ' + window.Android.androidSdk() + ' · 架构: ' + window.Android.abiList());
+  } catch (e) {}
+  try { lines.push('引擎: ' + (Engine && Engine.name ? Engine.name : '未就绪')); } catch (e) {}
+  var errs = window.__ERRS || [];
+  lines.push('脚本错误: ' + errs.length + ' 次');
+  for (var i = Math.max(0, errs.length - 5); i < errs.length; i++) {
+    lines.push('· ' + String(errs[i]).slice(0, 110));
+  }
+  el.textContent = lines.join('\n');
+  el.style.whiteSpace = 'pre-wrap';
+  el.style.fontFamily = 'monospace';
+  el.style.fontSize = '11px';
+}
+
+/* 设置事件：静态元素只绑定一次 */
+function bindSettingsEvents() {
+  if (App._settingsBound) return;
+  App._settingsBound = true;
+  var get = function (id) { return document.getElementById(id); };
+  var live = get('setLive');
+  if (live) live.addEventListener('change', function () {
     App.settings.liveOn = this.value === '1';
     App.liveOn = !!App.settings.liveOn;
     saveSettings();
     if (App.liveOn) scheduleLive(); else UI.renderEvalBar(null, '', false);
   });
-  el.querySelector('#setLiveDepth').addEventListener('change', function () { App.settings.liveDepth = +this.value; saveSettings(); });
-  el.querySelector('#setReviewDepth').addEventListener('change', function () { App.settings.reviewDepth = +this.value; saveSettings(); });
-  el.querySelector('#setHash').addEventListener('change', function () {
+  var ob = get('setOnlineBook');
+  if (ob) ob.addEventListener('change', function () {
+    App.settings.onlineBook = this.value === '1' ? 1 : 0;
+    saveSettings();
+    if (typeof BookOnline !== 'undefined') BookOnline.enabled = App.settings.onlineBook !== 0;
+  });
+  var ld = get('setLiveDepth');
+  if (ld) ld.addEventListener('change', function () { App.settings.liveDepth = +this.value; saveSettings(); });
+  var rd = get('setReviewDepth');
+  if (rd) rd.addEventListener('change', function () { App.settings.reviewDepth = +this.value; saveSettings(); });
+  var hs = get('setHash');
+  if (hs) hs.addEventListener('change', function () {
     App.settings.hash = +this.value; saveSettings();
     Engine.setOption('Hash', this.value);
   });
-  el.querySelector('#btnModelDownload').addEventListener('click', function () {
-    var u = el.querySelector('#modelUrl').value.trim();
+  var md = get('btnModelDownload');
+  if (md) md.addEventListener('click', function () {
+    var iu = get('modelUrl');
+    var u = (iu ? iu.value : '').trim();
     if (!/^https?:\/\//.test(u)) { UI.toast('请输入有效的模型 URL', false); return; }
     var name = u.split('/').pop().split('?')[0] || 'custom.nnue';
     if (!/\.nnue$/.test(name)) name += '.nnue';
     downloadModel(u, name, null);
   });
-  el.querySelector('#btnUpdateCheck').addEventListener('click', function () {
-    var u = el.querySelector('#manifestUrl').value.trim();
+  var uc = get('btnUpdateCheck');
+  if (uc) uc.addEventListener('click', function () {
+    var mu = get('manifestUrl');
+    var u = (mu ? mu.value : '').trim();
     if (!/^https?:\/\//.test(u)) { UI.toast('请输入有效的清单 URL', false); return; }
     App.settings.manifestUrl = u; saveSettings();
-    el.querySelector('#updateResult').textContent = '检查中…';
+    var r = get('updateResult');
+    if (r) r.textContent = '检查中…';
     if (window.Android) window.Android.checkUpdate(u);
-    else el.querySelector('#updateResult').textContent = '（浏览器测试模式：更新功能需要 Android 环境）';
+    else if (r) r.textContent = '（浏览器测试模式：更新功能需要 Android 环境）';
   });
-  el.querySelector('#btnUpdateInstall').addEventListener('click', function () {
-    var u = el.querySelector('#apkUrl').value.trim();
+  var ui2 = get('btnUpdateInstall');
+  if (ui2) ui2.addEventListener('click', function () {
+    var au = get('apkUrl');
+    var u = (au ? au.value : '').trim();
     if (!/^https?:\/\//.test(u)) { UI.toast('请输入有效的 APK URL', false); return; }
     if (window.Android) window.Android.installFromUrl(u);
     else UI.toast('浏览器测试模式不支持安装', false);
   });
-  el.querySelector('#btnGpl').addEventListener('click', function () {
+  var gpl = get('btnGpl');
+  if (gpl) gpl.addEventListener('click', function () {
     if (window.Android) window.Android.openUrl('https://stockfishchess.org/');
     else window.open('https://stockfishchess.org/');
   });
-  renderModelsList();
 }
 
 /* ---------------- 模型管理 ---------------- */
@@ -823,8 +922,18 @@ window.Bridge.pgnShared = function (text) {
 
 /* ---------------- 启动 ---------------- */
 function boot() {
+  // 全局错误记录 + 提示（真机排查：设置页「诊断信息」可见最近错误）
+  window.__ERRS = [];
+  window.addEventListener('error', function (ev) {
+    var msg = ev && ev.message ? String(ev.message) : '';
+    if (!msg) return;
+    window.__ERRS.push(msg);
+    if (window.__ERRS.length > 20) window.__ERRS.shift();
+    try { UI.toast('脚本错误：' + msg, false); } catch (e) {}
+  });
   loadSettings();
   App.liveOn = !!App.settings.liveOn;
+  if (typeof BookOnline !== 'undefined') BookOnline.enabled = App.settings.onlineBook !== 0;
   Engine.init();
 
   // 控制器
@@ -872,6 +981,7 @@ function boot() {
   if (!restored) newGame();
 
   bindEvents();
+  bindSettingsEvents();
   switchView('board');
 
   // 引擎启动
@@ -880,10 +990,11 @@ function boot() {
     livePump();
   }, 200);
 
-  // URL 参数：自测 / 演示
-  var qs = new URLSearchParams(location.search);
-  if (qs.get('test')) runSelfTests();
-  if (qs.get('demo')) loadDemo();
+  // URL 参数：自测 / 演示（兼容无 URLSearchParams 的旧 WebView）
+  var qs = null;
+  try { qs = new URLSearchParams(location.search); } catch (e) {}
+  if (qs && qs.get('test')) runSelfTests();
+  if (qs && qs.get('demo')) loadDemo();
 }
 
 function bindEvents() {
@@ -893,9 +1004,13 @@ function bindEvents() {
     b.addEventListener('click', function () { switchView(b.dataset.view); });
   });
 
-  // 棋盘工具
+  // 棋盘工具（v1.0.3：新增 ⏮◀▶⏭ 步进导航，恢复上一步/下一步功能）
+  $('btnBFirst').addEventListener('click', function () { gotoBoardPly(0); });
+  $('btnBPrev').addEventListener('click', function () { gotoBoardPly((App.navIdx || 0) - 1); });
+  $('btnBNext').addEventListener('click', function () { gotoBoardPly((App.navIdx || 0) + 1); });
+  $('btnBLast').addEventListener('click', function () { gotoBoardPly(App.game ? App.game.ucis.length : 0); });
   $('btnUndo').addEventListener('click', undoMove);
-  $('btnFlip').addEventListener('click', function () { UI.flip(); });
+  $('btnFlip').addEventListener('click', function () { UI.flip(); updateBoardBadge(); });
   $('btnNew').addEventListener('click', function () {
     confirm2('开始新对局？当前对局记录将被清除。', function () { newGame(); });
   });
@@ -1105,6 +1220,23 @@ function runSelfTests() {
     return !g2.error && g2.ucis.length === g.ucis.length;
   });
 
+  // Lichess 带评注 PGN（注释/嵌套变着/NAG/!?后缀/粘连步数/BOM/FEN起始）
+  var LICHESS_PGN = '[Event "Rated Blitz game"]\n[Site "https://lichess.org/AbCdEfGh"]\n[Date "2026.10.30"]\n[White "Alice"]\n[Black "Bob"]\n[Result "1-0"]\n\n' +
+    '1. e4 { [%clk 0:03:00] } 1... c5 { [%clk 0:02:58] } 2. Nf3 { A good move (develops). } 2... Nc6 { (2... d5 3. exd5 Qxd5 { an alternative }) } ' +
+    '3. d4!? { [%clk 0:02:40] } cxd4 4. Nxd4 Nf6 $2 5. Nc3 e5 6. Ndb5 { [%eval 0.25] [%clk 0:01:30] } d6 7. Bg5 a6 8. Nxd6+?? Bxd6 9. Bxf6 Qxf6 1-0';
+  T('PGN lichess comments/variations/glyphs/NAG', function () {
+    var g = parsePgn(LICHESS_PGN);
+    return !g.error && g.ucis.length === 18 && g.sans[0] === 'e4' && g.sans[4] === 'd4' && g.sans[14] === 'Nxd6+' && g.result === '1-0';
+  });
+  T('PGN BOM + glued move numbers', function () {
+    var g = parsePgn('\uFEFF[Event "T"]\n\n1.e4 e5 2.Nf3 Nc6 3.Bb5 a6 1-0');
+    return !g.error && g.ucis.length === 6 && g.sans[2] === 'Nf3';
+  });
+  T('PGN custom start FEN', function () {
+    var g = parsePgn('[FEN "8/P7/8/8/8/8/8/k1K5 w - - 0 1"]\n[Result "*"]\n\n1. a8=Q *');
+    return !g.error && g.ucis.length === 1 && g.ucis[0].slice(0, 4) === 'a7a8' && g.ucis[0].length === 5;
+  });
+
   // 开局库合法性
   var bookBad = [];
   for (var i = 0; i < BOOK_LINES.length; i++) {
@@ -1174,10 +1306,64 @@ function runSelfTests() {
   T('classify best', function () { return clsOf(80, 80, { played: 'e2e4' }) === 'best'; });
   T('classify great', function () { return clsOf(80, 80, { played: 'e2e4', second: 60 }) === 'great'; });
   T('classify forced single legal', function () { return clsOf(80, 80, { legal: 1 }) === 'forced'; });
-  T('classify forced equal decisive', function () { return clsOf(95, 93, { second: 94.2 }) === 'forced'; });
+  T('classify decisive equal NOT forced (only-legal rule)', function () { return ['good', 'excellent'].indexOf(clsOf(95, 93, { second: 94.2 })) >= 0; });
+  T('classify brilliant = sacrifice + engine best', function () {
+    var a = mkNode(50, 'w', 30, 'h1d5', 'd2d3', 30); // 次佳胜率 30 → spread 20（唯一好棋）
+    a.fen = '3qk3/8/8/3p4/8/8/8/4K2R w - - 0 1';
+    var b = mkNode(48, 'b', 30, null, null);
+    b.fen = '3qk3/8/8/3R4/8/8/8/4K3 b - - 0 1';
+    b.playedUci = 'h1d5';
+    b.pv1 = ['d8d5']; // 对方最佳：Qxd5 吃回 → 弃车
+    var c = REVIEW.classifyMove([a, b], 0, '', null);
+    return c.cls === 'brilliant' && c.sac >= 4;
+  });
+  // 弃子口径（v1.0.3 双方子力差）：等价交换 / 以小换大不算弃子；以大换小才算
+  T('sacrifice: equal trade is NOT a sac', function () {
+    var a = REVIEW.makeNode('3nk3/1r6/8/8/8/8/8/1R1K4 w - - 0 1', 'w', 30);
+    var b = REVIEW.makeNode('3nk3/1R6/8/8/8/8/8/3K4 b - - 0 1', 'b', 30);
+    b.pv1 = ['d8b7']; // 马(d8)吃回车(b7)：车换车，等价交换
+    return REVIEW.sacrificeValue(a, b, false) === 0;
+  });
+  T('sacrifice: small-for-big is NOT a sac', function () {
+    var a = REVIEW.makeNode('3nk3/1r6/8/2N5/8/8/8/4K3 w - - 0 1', 'w', 30);
+    var b = REVIEW.makeNode('3nk3/1N6/8/8/8/8/8/4K3 b - - 0 1', 'b', 30);
+    b.pv1 = ['d8b7']; // 马吃回马：马换车，以小换大
+    return REVIEW.sacrificeValue(a, b, false) === 0;
+  });
+  T('sacrifice: real bishop-for-pawn sac = 2', function () {
+    var a = REVIEW.makeNode('7k/7p/8/8/8/8/8/1B1K4 w - - 0 1', 'w', 30);
+    var b = REVIEW.makeNode('7k/7B/8/8/8/8/8/3K4 b - - 0 1', 'b', 30);
+    b.pv1 = ['h8h7']; // 王吃回象：象换兵，真弃子
+    return REVIEW.sacrificeValue(a, b, false) === 2;
+  });
+  T('settings & board nav static DOM', function () {
+    return !!(document.getElementById('setLive') && document.getElementById('setOnlineBook') &&
+      document.getElementById('setReviewDepth') && document.getElementById('diagBody') &&
+      document.getElementById('btnBPrev') && document.getElementById('btnBNext'));
+  });
   T('classify quiet not forced', function () { return clsOf(50, 50, { second: 49.2 }) === 'best'; });
   T('classify miss', function () { return clsOf(96, 60) === 'miss'; });
   T('classify book', function () { return clsOf(50, 50, { prefix: 'e2e4' }) === 'book'; });
+  T('classify book online hit (priority over local)', function () {
+    var a = mkNode(50, 'w', 30, 'e2e4', 'e2e3', 47);
+    a.fen = START_FEN;
+    a.bookOnline = { ok: true, name: "B00 King's Pawn", moves: [{ uci: 'e2e4', games: 100000 }] };
+    var b = mkNode(50, 'b', 30, null, null);
+    b.fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
+    b.playedUci = 'e2e4'; b.pv1 = [];
+    var c = REVIEW.classifyMove([a, b], 0, '', null);
+    return c.cls === 'book' && c.bookName === "B00 King's Pawn";
+  });
+  T('classify online says not book (no local fallback)', function () {
+    var a = mkNode(50, 'w', 30, 'd2d4', 'e2e3', 47);
+    a.fen = START_FEN;
+    a.bookOnline = { ok: true, name: 'B00', moves: [{ uci: 'e2e4', games: 100000 }] };
+    var b = mkNode(50, 'b', 30, null, null);
+    b.fen = 'rnbqkbnr/pppppppp/8/8/3P4/8/PPPP1PPP/RNBQKBNR b KQkq d1 0 1';
+    b.playedUci = 'd2d4'; b.pv1 = [];
+    var c = REVIEW.classifyMove([a, b], 0, 'd2d4', null);
+    return c.cls === 'best';
+  });
 
   // 准确率
   T('accuracy formula', function () {

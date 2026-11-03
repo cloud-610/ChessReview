@@ -386,6 +386,7 @@ Position.prototype.san = function (move) {
 
 Position.prototype.sanToMove = function (sanStr) {
   var san = String(sanStr || '').trim()
+    .replace(/[!?]+$/, '')
     .replace(/[+#]+$/, '')
     .replace(/e\.p\.?$/i, '')
     .replace(/0/g, 'O');
@@ -472,34 +473,77 @@ function stripPgnNoise(s) {
 
 function parsePgn(text) {
   var headers = {};
-  var lines = String(text || '').split(/\r?\n/);
+  var s = String(text || '').replace(/^\uFEFF/, ''); // 去 BOM（Lichess 下载文件常见）
+  var lines = s.split(/\r?\n/);
   var i = 0;
   for (; i < lines.length; i++) {
-    var hm = lines[i].match(/^\[(\w+)\s+"(.*)"\]\s*$/);
-    if (hm) headers[hm[1]] = hm[2];
-    else if (lines[i].trim() !== '') break;
+    var hm = lines[i].match(/^\s*\[(\w+)\s+"(.*)"\]\s*$/);
+    if (hm) { headers[hm[1]] = hm[2]; continue; }
+    if (lines[i].trim() === '') continue;
+    break;
   }
-  var body = stripPgnNoise(lines.slice(i).join(' '));
-  var tokens = body.split(/\s+/).filter(function (t) { return t.length > 0; });
+  var body = lines.slice(i).join('\n');
   var startFen = headers['FEN'] || START_FEN;
   var pos;
   try { pos = new Position(startFen); }
   catch (e) { return { headers: headers, error: '初始 FEN 无效: ' + startFen }; }
 
+  /* ---- 词法切分：跳过 {} 注释（含嵌套）/ () 变着（含嵌套）/ ; 行注释 / % 转义行 ---- */
+  var tokens = [], tok = '';
+  var n = body.length, p = 0;
+  function flushTok() { if (tok) { tokens.push(tok); tok = ''; } }
+  while (p < n) {
+    var c = body.charAt(p);
+    if (c === '{') {
+      flushTok(); p++;
+      var bd = 0;
+      while (p < n) {
+        var bc = body.charAt(p);
+        if (bc === '{') { bd++; p++; continue; }
+        if (bc === '}') {
+          p++;
+          if (bd === 0) break;
+          bd--; continue;
+        }
+        p++;
+      }
+      continue;
+    }
+    if (c === '(') {
+      flushTok();
+      var d = 0;
+      while (p < n) {
+        var vc = body.charAt(p);
+        if (vc === '{') { p++; while (p < n && body.charAt(p) !== '}') p++; if (p < n) p++; continue; }
+        if (vc === '(') { d++; p++; continue; }
+        if (vc === ')') { d--; p++; if (d === 0) break; continue; }
+        p++;
+      }
+      continue;
+    }
+    if (c === ';') { flushTok(); while (p < n && body.charAt(p) !== '\n') p++; continue; }
+    if (c === '%' && (p === 0 || body.charAt(p - 1) === '\n')) { flushTok(); while (p < n && body.charAt(p) !== '\n') p++; continue; }
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { flushTok(); p++; continue; }
+    tok += c; p++;
+  }
+  flushTok();
+
   var sans = [], ucis = [], result = headers['Result'] || '*';
   for (var k = 0; k < tokens.length; k++) {
     var tk = tokens[k];
     if (/^(1-0|0-1|1\/2-1\/2|\*)$/.test(tk)) { result = tk; continue; }
-    if (/^\$\d+$/.test(tk)) continue;
-    var glued = tk.match(/^\d+\.(\.\.)?(.*)$/);
-    if (glued) { tk = glued[2]; if (!tk) continue; }
-    if (/^\d+\.$/.test(tk)) continue;
-    if (/^\(|\)$/.test(tk)) continue;
+    if (/^\$\d+$/.test(tk)) continue;            // NAG（$1 等）
+    if (/^[\d.]+$/.test(tk)) continue;           // 纯步数（1. / 1... / 12）
+    tk = tk.replace(/^[\d.]*[.]/, '');           // 粘连步数（1.e4 / 1...e5 / 12.Ng5）
+    tk = tk.replace(/[!?]+$/, '');                // 着法评价后缀（e4!? / Nf3!! / Nxd6+??）
+    tk = tk.replace(/\$\d+$/, '');               // 粘连 NAG
+    tk = tk.replace(/e\.p\.?$/i, '');            // 吃过路兵后缀
+    if (!tk || /^[!?]+$/.test(tk)) continue;
     var mv = pos.sanToMove(tk);
     if (!mv) {
       return {
         headers: headers, sans: sans, ucis: ucis, result: result,
-        error: '第 ' + (sans.length + 1) + ' 手无法解析: "' + tk + '"（' + (sans.length + 1) + '... ' + tk + '）'
+        error: '第 ' + (sans.length + 1) + ' 手无法解析: "' + tk + '"'
       };
     }
     sans.push(pos.san(mv));

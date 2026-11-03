@@ -31,7 +31,7 @@ body {
 /* ---------------- 顶栏 ---------------- */
 #topbar {
   position: sticky; top: 0; z-index: 50;
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 4px;
   padding: 8px 10px;
   background: var(--panel-deep);
   border-bottom: 1px solid #1F1D1A;
@@ -42,11 +42,11 @@ body {
   background: var(--accent);
   display: inline-block;
 }
-#tabs { display: flex; gap: 2px; }
+#tabs { display: flex; gap: 2px; flex: 1; min-width: 0; }
 #tabs button {
   background: transparent; border: none; cursor: pointer;
   color: var(--muted); font-weight: 700; font-size: 13px;
-  padding: 6px 12px; border-radius: 6px;
+  padding: 8px 12px; min-height: 34px; border-radius: 6px;
 }
 #tabs button.active { background: var(--panel); color: var(--text); }
 .chip {
@@ -150,7 +150,7 @@ main { max-width: 540px; margin: 0 auto; }
 #boardMovesBox, #reviewMovesPanel {
   background: var(--panel); border-radius: 10px; margin: 0 10px; padding: 4px 6px 8px;
 }
-.mrow-wrap { max-height: 260px; overflow-y: auto; }
+.mrow-wrap { max-height: 260px; overflow-y: auto; position: relative; }
 .mrow { display: flex; gap: 4px; padding: 1px 2px; align-items: center; }
 .mnum { width: 28px; flex: none; color: var(--muted); font-size: 12px; font-weight: 700; text-align: right; padding-right: 4px; }
 .mv {
@@ -182,6 +182,17 @@ main { max-width: 540px; margin: 0 auto; }
 .b-miss { background: #E069A8; }         /* 失误 粉红 ✕ */
 .b-blunder { background: #D3453B; }      /* 败招 红 ?? */
 .b-forced { background: #71A344; }       /* 被强迫 绿右箭头 */
+
+/* 棋盘落子格右上角小徽章（比着法列表徽章小，不遮挡棋子主体） */
+.sq-badge {
+  position: absolute; top: 3%; right: 3%;
+  width: 34%; height: 34%; min-width: 15px; min-height: 15px;
+  font-size: 9px;
+  z-index: 16; pointer-events: none;
+  border: 1.5px solid rgba(255, 255, 255, .92);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .55);
+}
+.sq-badge svg { width: 58%; height: 58%; }
 
 /* ---------------- 复盘视图 ---------------- */
 .intro-card {

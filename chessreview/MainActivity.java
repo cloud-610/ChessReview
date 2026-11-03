@@ -750,6 +750,43 @@ public class MainActivity extends Activity implements Downloader.Callback {
             MainActivity.this.shareText(subject, text);
         }
 
+        /** 通用 HTTP GET（在线开局库等），结果经 window.Bridge.httpDone(cbId, ok, body) 回调 */
+        @JavascriptInterface
+        public void httpGet(final String url, final String cbId) {
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    String body = null;
+                    boolean ok = false;
+                    HttpURLConnection conn = null;
+                    try {
+                        conn = (HttpURLConnection) new URL(url).openConnection();
+                        conn.setConnectTimeout(4000);
+                        conn.setReadTimeout(6000);
+                        conn.setInstanceFollowRedirects(true);
+                        conn.setRequestProperty("User-Agent", "ChessReview/" + appVersion());
+                        if (conn.getResponseCode() == 200) {
+                            InputStream in = conn.getInputStream();
+                            java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                            byte[] buf = new byte[8192];
+                            int n;
+                            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+                            in.close();
+                            body = new String(bos.toByteArray(), "UTF-8");
+                            ok = true;
+                        }
+                    } catch (Throwable t) {
+                        ok = false;
+                    } finally {
+                        if (conn != null) try { conn.disconnect(); } catch (Throwable ignored) {}
+                    }
+                    final boolean fok = ok;
+                    final String fbody = body;
+                    js("window.Bridge&&window.Bridge.httpDone(" + quote(cbId) + "," + fok + ","
+                            + (fbody == null ? "null" : quote(fbody)) + ")");
+                }
+            }, "http-get").start();
+        }
+
         @JavascriptInterface
         public void pgnPick() {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
