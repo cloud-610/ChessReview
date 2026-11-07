@@ -27,8 +27,7 @@ var DEFAULT_SETTINGS = {
   reviewDepth: 18,
   liveDepth: 13,
   liveOn: 1,
-  onlineBook: 1,       // 在线开局库（lichess 开局浏览器）
-  manifestUrl: 'https://example.com/chessreview/update.json'
+  onlineBook: 1       // 在线开局库（lichess 开局浏览器）
 };
 
 function loadSettings() {
@@ -438,6 +437,7 @@ function switchView(v) {
       refreshBoardView();
     }
     if (v === 'settings') renderSettingsView();
+    else if (v === 'engines') renderEnginesView();
   } catch (e) {
     try { UI.toast('打开页面出错：' + (e && e.message), false); } catch (e2) {}
   }
@@ -687,6 +687,11 @@ function renderSettingsView() {
 
 function syncSettingsView() {
   var s = App.settings;
+  // v1.1.2：版本号最先同步（即使后续步骤异常也显示正确版本）
+  try {
+    var ver0 = document.getElementById('setVersion');
+    if (ver0) ver0.textContent = window.Android ? ('v' + window.Android.appVersion()) : 'v1.1.2（浏览器测试）';
+  } catch (e) {}
   function setVal(id, v) {
     try { var e = document.getElementById(id); if (e) e.value = String(v); } catch (e2) {}
   }
@@ -695,10 +700,9 @@ function syncSettingsView() {
   setVal('setLiveDepth', s.liveDepth);
   setVal('setReviewDepth', s.reviewDepth);
   setVal('setHash', s.hash);
-  try { var mu = document.getElementById('manifestUrl'); if (mu) mu.value = s.manifestUrl || ''; } catch (e) {}
   try {
     var ver = document.getElementById('setVersion');
-    if (ver) ver.textContent = window.Android ? ('v' + window.Android.appVersion()) : 'v1.0.3（浏览器测试）';
+    if (ver) ver.textContent = window.Android ? ('v' + window.Android.appVersion()) : 'v1.1.2（浏览器测试）';
   } catch (e) {}
   renderModelsList();
   try { renderDiag(); } catch (e) {}
@@ -763,13 +767,9 @@ function bindSettingsEvents() {
   });
   var uc = get('btnUpdateCheck');
   if (uc) uc.addEventListener('click', function () {
-    var mu = get('manifestUrl');
-    var u = (mu ? mu.value : '').trim();
-    if (!/^https?:\/\//.test(u)) { UI.toast('请输入有效的清单 URL', false); return; }
-    App.settings.manifestUrl = u; saveSettings();
     var r = get('updateResult');
-    if (r) r.textContent = '检查中…';
-    if (window.Android) window.Android.checkUpdate(u);
+    if (r) r.textContent = '正在从 GitHub Releases 检查（仅正式版）…';
+    if (window.Android) window.Android.checkUpdate('');
     else if (r) r.textContent = '（浏览器测试模式：更新功能需要 Android 环境）';
   });
   var ui2 = get('btnUpdateInstall');
@@ -886,17 +886,20 @@ window.Bridge.updateInfo = function (json) {
   try {
     var info = typeof json === 'string' ? JSON.parse(json) : json;
     if (!info.ok) { el.textContent = '检查失败：' + (info.error || '网络错误'); return; }
-    if (!info.hasUpdate) {
-      el.textContent = '已是最新版本 v' + info.currentVersion + '。';
-    } else {
-      el.innerHTML = '发现新版本 <b>v' + esc(info.versionName) + '</b>' +
-        (info.notes ? '<div class="set-note">' + esc(info.notes) + '</div>' : '') +
-        '<button class="btn small" id="btnDoUpdate">下载并安装</button>';
-      var btn = el.querySelector('#btnDoUpdate');
-      btn.addEventListener('click', function () {
-        if (window.Android) window.Android.installFromUrl(info.apkUrl);
-      });
+    var latest = String(info.latestVersion || '').replace(/^v/i, '');
+    var cur = String(info.currentVersion || '').replace(/^v/i, '');
+    if (!isNewerVersion(latest, cur)) {
+      el.textContent = '已是最新版本 v' + cur + '。';
+      return;
     }
+    el.innerHTML = '发现新版本 <b>v' + esc(latest) + '</b>' +
+      (info.notes ? '<div class="set-note">' + esc(String(info.notes).slice(0, 400)) + '</div>' : '') +
+      '<button class="btn small" id="btnDoUpdate">下载并安装</button>';
+    var btn = el.querySelector('#btnDoUpdate');
+    btn.addEventListener('click', function () {
+      if (window.Android && info.apkUrl) window.Android.installFromUrl(info.apkUrl);
+      else UI.toast('该 Release 未附带 APK 文件', false);
+    });
   } catch (e) { el.textContent = '解析更新信息失败'; }
 };
 window.Bridge.needInstallPermission = function () {
@@ -918,6 +921,59 @@ window.Bridge.pgnShared = function (text) {
   var ta = document.getElementById('pgnText');
   if (ta && text) ta.value = text;
   UI.showDialog('dlgPgn');
+};
+
+/* ---------------- 引擎库视图（自定义引擎管理） ---------------- */
+
+function isNewerVersion(a, b) {
+  var pa = String(a || '').replace(/^v/i, '').split('.');
+  var pb = String(b || '').replace(/^v/i, '').split('.');
+  for (var i = 0; i < 3; i++) {
+    var x = parseInt(pa[i], 10) || 0;
+    var y = parseInt(pb[i], 10) || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
+function renderEnginesView() {
+  var list = document.getElementById('enginesBody');
+  if (!list) return;
+  if (!window.Android) {
+    list.innerHTML = '<div class="set-note">浏览器测试模式：引擎管理需要 Android 环境</div>';
+  } else {
+    try {
+      var arr = JSON.parse(window.Android.enginesList() || '[]');
+      var html = arr.map(function (e) {
+        var btns = '';
+        if (!e.active) btns += '<button class="btn small" data-engine-use="' + esc(e.path) + '">启用</button>';
+        if (!e.builtin && !e.active) btns += '<button class="btn small" data-engine-del="' + esc(e.path) + '">删除</button>';
+        return '<div class="model-row' + (e.active ? ' active' : '') + '">' +
+          '<span class="model-name">' + esc(e.name) + '</span>' +
+          '<span class="model-size">' + (e.builtin ? '内置' : (e.size / 1048576).toFixed(1) + ' MB') + '</span>' +
+          (e.active ? '<span class="model-tag">使用中</span>' : '') + btns + '</div>';
+      }).join('');
+      list.innerHTML = html;
+      Array.prototype.forEach.call(list.querySelectorAll('[data-engine-use]'), function (b) {
+        b.addEventListener('click', function () {
+          b.disabled = true; b.textContent = '切换中…';
+          try { window.Android.enginesActivate(b.dataset.engineUse); UI.toast('已切换引擎'); } catch (e) { UI.toast('切换失败', false); }
+          renderEnginesView();
+        });
+      });
+      Array.prototype.forEach.call(list.querySelectorAll('[data-engine-del]'), function (b) {
+        b.addEventListener('click', function () {
+          try { window.Android.enginesDelete(b.dataset.engineDel); UI.toast('已删除'); } catch (e) { UI.toast('删除失败', false); }
+          renderEnginesView();
+        });
+      });
+    } catch (e) { list.innerHTML = '<div class="set-note">读取失败</div>'; }
+  }
+}
+
+window.Bridge.enginePicked = function (ok, msg) {
+  UI.toast(msg, ok);
+  renderEnginesView();
 };
 
 /* ---------------- 启动 ---------------- */
@@ -1011,6 +1067,11 @@ function bindEvents() {
   $('btnBLast').addEventListener('click', function () { gotoBoardPly(App.game ? App.game.ucis.length : 0); });
   $('btnUndo').addEventListener('click', undoMove);
   $('btnFlip').addEventListener('click', function () { UI.flip(); updateBoardBadge(); });
+  var ef = $('btnEngineFromFolder');
+  if (ef) ef.addEventListener('click', function () {
+    if (window.Android) window.Android.enginePick();
+    else UI.toast('浏览器测试模式：需要 Android 环境', false);
+  });
   $('btnNew').addEventListener('click', function () {
     confirm2('开始新对局？当前对局记录将被清除。', function () { newGame(); });
   });
@@ -1341,8 +1402,36 @@ function runSelfTests() {
       document.getElementById('setReviewDepth') && document.getElementById('diagBody') &&
       document.getElementById('btnBPrev') && document.getElementById('btnBNext'));
   });
+  T('isNewerVersion 1.1.0 > 1.0.3', function () { return isNewerVersion('1.1.0', '1.0.3') === true; });
+  T('isNewerVersion equal = false', function () { return isNewerVersion('v1.0.3', '1.0.3') === false; });
+  T('isNewerVersion 1.0.10 > 1.0.9', function () { return isNewerVersion('1.0.10', '1.0.9') === true; });
+  T('engines view static DOM', function () {
+    return !!(document.getElementById('enginesBody') && document.getElementById('btnEngineFromFolder'));
+  });
   T('classify quiet not forced', function () { return clsOf(50, 50, { second: 49.2 }) === 'best'; });
   T('classify miss', function () { return clsOf(96, 60) === 'miss'; });
+  // v1.1.2：漏杀判定（有 forced mate 却没走出 → 失误）
+  T('classify missed mate still winning = miss', function () {
+    var a = mkNode(100, 'w', 30, 'e2e4', 'd2d3', 93);
+    a.mate1 = 2; // 引擎报告有 forced mate
+    a.fen = START_FEN;
+    var b = mkNode(93, 'b', 30, null, null);
+    b.fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
+    b.playedUci = 'd2d3';
+    b.pv1 = [];
+    return REVIEW.classifyMove([a, b], 0, '', null).cls === 'miss';
+  });
+  T('classify played the mate NOT miss', function () {
+    var a = mkNode(100, 'w', 30, 'e2e4', 'd2d3', 93);
+    a.mate1 = 2;
+    a.fen = START_FEN;
+    var b = mkNode(100, 'b', 30, null, null);
+    b.mate1 = -1; // 走出杀着后对方将被杀
+    b.fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
+    b.playedUci = 'e2e4';
+    b.pv1 = [];
+    return REVIEW.classifyMove([a, b], 0, '', null).cls !== 'miss';
+  });
   T('classify book', function () { return clsOf(50, 50, { prefix: 'e2e4' }) === 'book'; });
   T('classify book online hit (priority over local)', function () {
     var a = mkNode(50, 'w', 30, 'e2e4', 'e2e3', 47);

@@ -48,6 +48,7 @@ public class MainActivity extends Activity implements Downloader.Callback {
     private static final String TAG = "ChessReview";
     private static final int REQ_PGN_OPEN = 1001;
     private static final int REQ_PGN_SAVE = 1002;
+    private static final int REQ_ENGINE_OPEN = 1003;
 
     private WebView webView;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -163,6 +164,11 @@ public class MainActivity extends Activity implements Downloader.Callback {
                 js("window.Bridge&&window.Bridge.pgnSaved(false," + quote(String.valueOf(e.getMessage())) + ")");
             }
             pendingSaveContent = null;
+        } else if (requestCode == REQ_ENGINE_OPEN) {
+            final Uri engineUri = uri;
+            new Thread(new Runnable() {
+                @Override public void run() { installEngineFromUri(engineUri); }
+            }, "engine-install").start();
         }
     }
 
@@ -187,14 +193,27 @@ public class MainActivity extends Activity implements Downloader.Callback {
     // ------------------------------------------------------------------
     // 引擎
 
-    /** 返回本机可用的引擎可执行文件路径（lib/<abi>/libstockfish.so 由安装器解出并可执行）。 */
+    /** 返回本机可用的引擎可执行文件：优先用户安装的自定义引擎，否则 APK 内置。 */
     private String pickEngineBinary() {
         try {
+            String custom = prefs.getString("customEngine", "");
+            if (!custom.isEmpty()) {
+                File f = new File(custom);
+                if (f.exists() && f.canExecute()) return f.getAbsolutePath();
+                prefs.edit().putString("customEngine", "").apply(); // 自定义引擎失效则回退内置
+            }
             String dir = getApplicationInfo().nativeLibraryDir;
-            File f = new File(dir, "libstockfish.so");
-            if (f.exists() && f.canExecute()) return f.getAbsolutePath();
+            File f2 = new File(dir, "libstockfish.so");
+            if (f2.exists() && f2.canExecute()) return f2.getAbsolutePath();
         } catch (Throwable ignored) {}
         return null;
+    }
+
+    private void restartEngine() {
+        try {
+            if (engine != null) { engine.shutdown(); engine = null; }
+        } catch (Throwable ignored) {}
+        startEngine();
     }
 
     private boolean startEngine() {
@@ -378,39 +397,56 @@ public class MainActivity extends Activity implements Downloader.Callback {
     // ------------------------------------------------------------------
     // 应用更新
 
-    private void checkUpdate(final String manifestUrl) {
+    /** 仅从 GitHub Releases 检查更新：只认正式版（自动跳过 draft 与 prerelease）。 */
+    private void checkUpdate(String unused) {
         new Thread(new Runnable() {
             @Override public void run() {
                 HttpURLConnection conn = null;
                 try {
-                    conn = (HttpURLConnection) new URL(manifestUrl).openConnection();
-                    conn.setConnectTimeout(15000);
-                    conn.setReadTimeout(20000);
+                    conn = (HttpURLConnection) new URL(
+                            "https://api.github.com/repos/cloud-610/ChessReview/releases?per_page=20").openConnection();
+                    conn.setConnectTimeout(10000);
+                    conn.setReadTimeout(15000);
                     conn.setInstanceFollowRedirects(true);
+                    conn.setRequestProperty("Accept", "application/vnd.github+json");
                     conn.setRequestProperty("User-Agent", "ChessReview/" + appVersion());
                     int code = conn.getResponseCode();
-                    if (code >= 400) throw new Exception("HTTP " + code);
+                    if (code != 200) throw new Exception("HTTP " + code);
                     InputStream in = conn.getInputStream();
                     byte[] buf = new byte[8192];
                     int n; StringBuilder sb = new StringBuilder();
                     while ((n = in.read(buf)) > 0) sb.append(new String(buf, 0, n, "UTF-8"));
                     in.close();
-                    JSONObject m = new JSONObject(sb.toString());
-                    long remote = m.optLong("versionCode", -1);
-                    String remoteName = m.optString("versionName", "");
-                    PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
-                    long cur = (Build.VERSION.SDK_INT >= 28) ? pi.getLongVersionCode()
-                            : (long) pi.versionCode;
+                    JSONArray arr = new JSONArray(sb.toString());
+                    JSONObject rel = null;
+                    for (int i = 0; i < arr.length(); i++) {
+                        JSONObject r = arr.getJSONObject(i);
+                        if (r.optBoolean("draft", false) || r.optBoolean("prerelease", false)) continue; // 跳过预发布/草稿
+                        rel = r; break;
+                    }
+                    if (rel == null) throw new Exception("暂无正式版 Release");
+                    String tag = rel.optString("tag_name", "");
+                    String name = rel.optString("name", tag);
+                    String notes = rel.optString("body", "");
+                    String apkUrl = "";
+                    JSONArray assets = rel.optJSONArray("assets");
+                    if (assets != null) {
+                        for (int i = 0; i < assets.length(); i++) {
+                            JSONObject a = assets.getJSONObject(i);
+                            String an = a.optString("name", "");
+                            if (an.toLowerCase().endsWith(".apk")) {
+                                apkUrl = a.optString("browser_download_url", "");
+                                break;
+                            }
+                        }
+                    }
                     JSONObject res = new JSONObject();
                     res.put("ok", true);
-                    res.put("hasUpdate", remote > cur);
-                    res.put("versionCode", remote);
-                    res.put("versionName", remoteName);
-                    res.put("apkUrl", m.optString("apkUrl", ""));
-                    res.put("sha256", m.optString("sha256", ""));
-                    res.put("notes", m.optString("notes", ""));
+                    res.put("latestVersion", tag);
+                    res.put("versionName", name);
+                    res.put("apkUrl", apkUrl);
+                    res.put("notes", notes);
                     res.put("currentVersion", appVersion());
-                    res.put("currentVersionCode", cur);
                     js("window.Bridge&&window.Bridge.updateInfo(" + res.toString() + ")");
                 } catch (Throwable e) {
                     try {
@@ -511,6 +547,170 @@ public class MainActivity extends Activity implements Downloader.Callback {
         } catch (Throwable t) {
             toast("无法打开设置: " + t.getMessage());
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 自定义引擎（.tar.gz / .tar 文件导入）
+
+    private File enginesDir() {
+        File d = new File(getFilesDir(), "engines");
+        if (!d.exists()) d.mkdirs();
+        return d;
+    }
+
+    private String lastTarInventory = "";
+
+    private void installEngineFromUri(Uri uri) {
+        try {
+            InputStream in = getContentResolver().openInputStream(uri);
+            String token = "local-" + System.currentTimeMillis();
+            List<File> files = extractEngineTarGz(in, new File(enginesDir(), token));
+            if (files.isEmpty()) throw new Exception("包内未找到可安装的引擎文件（>5MB）。包内文件: " + lastTarInventory);
+            File best = chooseBestEngine(files);
+            prefs.edit().putString("customEngine", best.getAbsolutePath()).apply();
+            restartEngine();
+            js("window.Bridge&&window.Bridge.enginePicked(true," + quote("已加载并启用: " + best.getName()) + ")");
+        } catch (Throwable t) {
+            js("window.Bridge&&window.Bridge.enginePicked(false," + quote("加载失败: " + t.getMessage()) + ")");
+        }
+    }
+
+    /** 解压 .tar.gz 或 .tar（魔数自动识别），提取 Stockfish 引擎可执行文件。
+     * 识别规则：大于 5MB 的常规文件（Stockfish 二进制必然是包内最大文件，不依赖文件名）。 */
+    private List<File> extractEngineTarGz(InputStream raw, File outDir) throws Exception {
+        List<File> out = new ArrayList<>();
+        List<String> inventory = new ArrayList<>();
+        // 魔数判断是否 gzip（1F 8B）：读出判定后必须推回流里再包装（v1.1.2 修复：
+        // 此前未推回，GZIPInputStream 从第 3 字节读文件头，所有合法 .tar.gz 报 Not in GZIP format）
+        java.io.PushbackInputStream pb = new java.io.PushbackInputStream(raw, 4);
+        int b1 = pb.read();
+        int b2 = pb.read();
+        boolean gzip = (b1 == 0x1F && b2 == 0x8B);
+        if (b2 != -1) pb.unread(b2);
+        if (b1 != -1) pb.unread(b1);
+        InputStream tar = gzip ? new java.util.zip.GZIPInputStream(pb, 1 << 16) : (InputStream) pb;
+        outDir.mkdirs();
+        byte[] header = new byte[512];
+        String longName = null;
+        while (true) {
+            int off = 0, r;
+            while (off < 512 && (r = tar.read(header, off, 512 - off)) != -1) off += r;
+            if (off == 0 || off < 512) break;
+            boolean allZero = true;
+            for (int i = 0; i < 512; i++) {
+                if (header[i] != 0) { allZero = false; break; }
+            }
+            if (allZero) break; // tar 结束块
+            String name = cstr(header, 0, 100);
+            String prefix = cstr(header, 345, 155);
+            if (!prefix.isEmpty()) name = prefix + "/" + name;
+            long size = parseOctal(header, 124, 12);
+            char type = (char) (header[156] & 0xFF);
+            long pad = (512 - (size % 512)) % 512; // 数据后的 512 对齐填充
+            if (type == 'L') { // GNU 长文件名
+                byte[] nb = new byte[(int) Math.min(size, 65536)];
+                readFully(tar, nb);
+                skipFully(tar, pad);
+                longName = cstr(nb, 0, nb.length);
+                continue;
+            }
+            if (longName != null) { name = longName; longName = null; }
+            String base = name.substring(name.lastIndexOf('/') + 1);
+            boolean regular = (type == '0' || type == 0);
+            if (regular && size > 0 && inventory.size() < 30) {
+                inventory.add(base + "(" + (size / 1024) + "KB)");
+            }
+            // 引擎识别：大于 5MB 的常规文件（不依赖文件名，兼容各种打包命名）
+            if (regular && size > 5242880L && size < 300000000L) {
+                File dest = new File(outDir, sanitizeFileName(base));
+                copyStreamToFile(tar, size, dest);
+                dest.setExecutable(true, false);
+                out.add(dest);
+            } else {
+                skipFully(tar, size);
+            }
+            // v1.1.2 修复：跳过对齐填充（此前缺失导致多文件包解析错位、提前终止）
+            skipFully(tar, pad);
+        }
+        try { tar.close(); } catch (Throwable ignored) {}
+        lastTarInventory = inventory.toString();
+        return out;
+    }
+
+    private static String cstr(byte[] buf, int off, int len) {
+        int end = off;
+        int max = Math.min(off + len, buf.length);
+        while (end < max && buf[end] != 0) end++;
+        try { return new String(buf, off, end - off, "UTF-8").trim(); }
+        catch (Throwable t) { return ""; }
+    }
+
+    private static long parseOctal(byte[] h, int off, int len) {
+        long v = 0;
+        for (int i = 0; i < len; i++) {
+            byte b = h[off + i];
+            if (b == 0 || b == ' ') break;
+            if (b < '0' || b > '7') break;
+            v = (v << 3) + (b - '0');
+        }
+        return v;
+    }
+
+    private static void readFully(InputStream in, byte[] buf) throws Exception {
+        int off = 0, n;
+        while (off < buf.length && (n = in.read(buf, off, buf.length - off)) != -1) off += n;
+    }
+
+    private static void skipFully(InputStream in, long size) throws Exception {
+        long skipped = 0;
+        while (skipped < size) {
+            long s = in.skip(size - skipped);
+            if (s <= 0) {
+                if (in.read() == -1) break;
+                skipped += 1;
+            } else skipped += s;
+        }
+    }
+
+    private static void copyStreamToFile(InputStream in, long size, File dest) throws Exception {
+        OutputStream out = new FileOutputStream(dest);
+        byte[] buf = new byte[65536];
+        long remaining = size;
+        while (remaining > 0) {
+            int want = (int) Math.min(buf.length, remaining);
+            int n = in.read(buf, 0, want);
+            if (n <= 0) break;
+            out.write(buf, 0, n);
+            remaining -= n;
+        }
+        out.flush();
+        out.close();
+    }
+
+    private static String sanitizeFileName(String s) {
+        String s2 = s.replaceAll("[^A-Za-z0-9._\\-]", "_");
+        return s2.isEmpty() ? "engine" : s2;
+    }
+
+    /** 从提取出的多个引擎二进制中选最适合当前 CPU 的（arm64 优先 armv8，32 位优先 armv7/neon）。 */
+    private File chooseBestEngine(List<File> files) {
+        boolean arm64 = false;
+        try {
+            arm64 = Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0
+                    && Build.SUPPORTED_ABIS[0].contains("arm64");
+        } catch (Throwable ignored) {}
+        File best = null;
+        int bestScore = -100;
+        for (File f : files) {
+            String n = f.getName().toLowerCase();
+            int s;
+            if (n.contains("armv8") || n.contains("arm64") || n.contains("v8a")) s = arm64 ? 3 : -1;
+            else if (n.contains("armv7-neon") || n.contains("neon")) s = arm64 ? 1 : 2;
+            else if (n.contains("armv7")) s = arm64 ? 0 : 3;
+            else s = -2;
+            if (s > bestScore) { bestScore = s; best = f; }
+        }
+        return best;
     }
 
     // ------------------------------------------------------------------
@@ -785,6 +985,95 @@ public class MainActivity extends Activity implements Downloader.Callback {
                             + (fbody == null ? "null" : quote(fbody)) + ")");
                 }
             }, "http-get").start();
+        }
+
+        @JavascriptInterface
+        public void enginePick() {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                    "application/gzip", "application/x-gzip", "application/x-tgz", "application/octet-stream", "*/*"});
+            try {
+                startActivityForResult(i, REQ_ENGINE_OPEN);
+            } catch (Throwable t) {
+                toast("无法打开文件选择器");
+            }
+        }
+
+        @JavascriptInterface
+        public String enginesList() {
+            try {
+                JSONArray arr = new JSONArray();
+                String active = prefs.getString("customEngine", "");
+                JSONObject builtin = new JSONObject();
+                builtin.put("name", "内置 Stockfish（APK 自带）");
+                builtin.put("path", "");
+                builtin.put("size", 0);
+                builtin.put("builtin", true);
+                builtin.put("active", active.isEmpty());
+                arr.put(builtin);
+                File[] dirs = enginesDir().listFiles();
+                if (dirs != null) {
+                    for (File d : dirs) {
+                        if (!d.isDirectory()) continue;
+                        File[] fs = d.listFiles();
+                        if (fs == null) continue;
+                        for (File f : fs) {
+                            if (!f.isFile() || !f.canExecute()) continue;
+                            JSONObject o = new JSONObject();
+                            o.put("name", d.getName() + " · " + f.getName());
+                            o.put("path", f.getAbsolutePath());
+                            o.put("size", f.length());
+                            o.put("builtin", false);
+                            o.put("active", f.getAbsolutePath().equals(active));
+                            arr.put(o);
+                        }
+                    }
+                }
+                return arr.toString();
+            } catch (Throwable t) {
+                return "[]";
+            }
+        }
+
+        @JavascriptInterface
+        public boolean enginesActivate(String path) {
+            try {
+                if (path == null || path.isEmpty()) {
+                    prefs.edit().putString("customEngine", "").apply();
+                } else {
+                    File f = new File(path);
+                    if (!f.exists() || !f.canExecute()) return false;
+                    prefs.edit().putString("customEngine", f.getAbsolutePath()).apply();
+                }
+                restartEngine();
+                return true;
+            } catch (Throwable t) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean enginesDelete(String path) {
+            try {
+                File f = new File(path);
+                String active = prefs.getString("customEngine", "");
+                boolean wasActive = f.getAbsolutePath().equals(active);
+                boolean ok = f.delete();
+                File dir = f.getParentFile();
+                if (dir != null && dir.isDirectory()) {
+                    String[] left = dir.list();
+                    if (left != null && left.length == 0) dir.delete();
+                }
+                if (wasActive) {
+                    prefs.edit().putString("customEngine", "").apply();
+                    restartEngine();
+                }
+                return ok;
+            } catch (Throwable t) {
+                return false;
+            }
         }
 
         @JavascriptInterface

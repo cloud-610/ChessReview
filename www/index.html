@@ -14,6 +14,7 @@
   <nav id="tabs">
     <button data-view="board" class="active">棋盘</button>
     <button data-view="review">复盘</button>
+    <button data-view="engines">引擎库</button>
     <button data-view="settings">设置</button>
   </nav>
   <div id="engineChip" class="chip">引擎…</div>
@@ -118,6 +119,16 @@
     </div>
   </section>
 
+  <!-- ============ 引擎库视图（v1.1.2：本地引擎管理） ============ -->
+  <section id="view-engines" class="view">
+    <div class="set-card">
+      <div class="sec-title">本机引擎</div>
+      <div id="enginesBody">（打开时加载）</div>
+      <button class="btn small" id="btnEngineFromFolder">从文件加载引擎（.tar.gz / .tar）</button>
+      <div class="set-note">支持官方 Stockfish 安卓压缩包（.tar.gz 或 .tar，如 stockfish-android-armv8.tar.gz）。加载后自动选择匹配 CPU 架构的引擎并启用，无需重启应用。</div>
+    </div>
+  </section>
+
   <!-- ============ 设置视图（v1.0.3：静态 HTML，不再由 JS 动态生成，杜绝动态渲染失败导致打不开） ============ -->
   <section id="view-settings" class="view">
     <div id="settingsBody">
@@ -156,8 +167,8 @@
       </div>
       <div class="set-card">
         <div class="sec-title">应用更新</div>
-        <div class="set-row"><label>当前版本</label><span id="setVersion">v1.0.3</span></div>
-        <div class="set-row"><label>版本清单 URL</label><input id="manifestUrl" type="url" placeholder="https://.../update.json"></div>
+        <div class="set-row"><label>当前版本</label><span id="setVersion">v1.1.2</span></div>
+        <div class="set-note">检查源：GitHub Releases（cloud-610/ChessReview，仅正式版，自动跳过预发布与草稿）。</div>
         <button class="btn small" id="btnUpdateCheck">检查更新</button>
         <div id="updateResult" class="set-note"></div>
         <div class="set-row"><label>直接安装 APK</label><input id="apkUrl" type="url" placeholder="https://.../ChessReview.apk"></div>

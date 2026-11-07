@@ -134,14 +134,18 @@ var REVIEW = {};
     if (onlineName) bookName = onlineName;
     else if (onlineName === '') bookName = null; // 在线库确认非谱着，不再回退本地
     else bookName = bookLookup(uciSeqPrefix) || null;
-    // 失误（漏杀）
+    // 失误（漏杀，v1.1.2）：曾有 forced mate 却没走出 → 失误（无论走后是否仍大优）；
+    // 或原有大优局面被明显放走（旧规则保留）
+    var hadMate = before.analyzed && before.mate1 !== null && before.mate1 !== undefined && before.mate1 > 0;
+    // after 节点轮到对方走：mate1 < 0 表示对方将被杀 → 行棋方仍保有杀
+    var keptMate = after.analyzed && after.mate1 !== null && after.mate1 !== undefined && after.mate1 < 0;
     var hadWin = false;
     if (before.analyzed) {
       var mateMover = before.mate1 !== null && before.mate1 !== undefined && before.mate1 > 0;
       var winBOk = winB >= 92;
       hadWin = mateMover || winBOk;
     }
-    var missed = hadWin && winA <= 85 && !isBest && loss >= 5;
+    var missed = (hadMate && !keptMate && !isBest) || (hadWin && winA <= 85 && !isBest && loss >= 5);
 
     // 妙手：弃子 + 引擎最佳，且（唯一好棋 或 保持优势/存在杀棋）
     var brilliant = false, sacVal = 0;
