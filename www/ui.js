@@ -156,11 +156,13 @@ var UI = {
     if (this._selected >= 0) {
       var target = this._legalTargets.filter(function (t) { return t.to === sq; })[0];
       if (target) {
+        var fromSq = this._selected; // v1.1.3 修复：先存起点再清选（_clearSelection 会把 _selected 置 -1，
+        // 旧代码清选后才用 this._selected 当起点，点选+点落点永远无效，只有拖拽可用）
         this._clearSelection();
         if (target.promoNeeded) {
-          this._showPromo(this._selected, sq);
+          this._showPromo(fromSq, sq);
         } else {
-          c.requestMove(this._selected, sq, 0);
+          c.requestMove(fromSq, sq, 0);
         }
         return;
       }
@@ -215,14 +217,33 @@ var UI = {
     var cell = boardRect.width / 8;
     el.classList.add('dragging');
     el.style.zIndex = 20;
+    var startX = ev ? ev.clientX : 0, startY = ev ? ev.clientY : 0;
     function onMove(e) {
       var u = (e.clientX - boardRect.left) / cell - 0.5;
       var v = (e.clientY - boardRect.top) / cell - 0.5;
       el.style.transform = 'translate(' + (u * 100) + '%,' + (v * 100) + '%)';
     }
-    function onUp(e) {
+    function detach() {
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onCancel);
+    }
+    function restoreHome() {
+      el.classList.remove('dragging');
+      el.style.zIndex = '';
+      var uv = self._sqToView(sq);
+      el.style.transform = 'translate(' + (uv[0] * 100) + '%,' + (uv[1] * 100) + '%)';
+    }
+    function onUp(e) {
+      detach();
+      var dx = (e.clientX || startX) - startX;
+      var dy = (e.clientY || startY) - startY;
+      // 轻点（位移小于半格）：视为“选中”手势——保留选中状态等待第二击选落点（v1.1.3 修复：
+      // 触屏抬指必有微小漂移，旧逻辑只要落点格≠原格就清空选中，导致点选+点落点永远无效）
+      if (Math.sqrt(dx * dx + dy * dy) < cell * 0.45) {
+        restoreHome();
+        return;
+      }
       var u = Math.floor((e.clientX - boardRect.left) / cell);
       var v = Math.floor((e.clientY - boardRect.top) / cell);
       el.classList.remove('dragging');
@@ -241,8 +262,13 @@ var UI = {
       }
       self.renderBoard(self.controller.getPosition().fen());
     }
+    function onCancel() {
+      detach();
+      restoreHome(); // 系统取消手势：同轻点处理，保留选中
+    }
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onCancel);
     onMove(ev);
   },
 

@@ -690,7 +690,7 @@ function syncSettingsView() {
   // v1.1.2：版本号最先同步（即使后续步骤异常也显示正确版本）
   try {
     var ver0 = document.getElementById('setVersion');
-    if (ver0) ver0.textContent = window.Android ? ('v' + window.Android.appVersion()) : 'v1.1.2（浏览器测试）';
+    if (ver0) ver0.textContent = window.Android ? ('v' + window.Android.appVersion()) : 'v1.1.3（浏览器测试）';
   } catch (e) {}
   function setVal(id, v) {
     try { var e = document.getElementById(id); if (e) e.value = String(v); } catch (e2) {}
@@ -702,7 +702,7 @@ function syncSettingsView() {
   setVal('setHash', s.hash);
   try {
     var ver = document.getElementById('setVersion');
-    if (ver) ver.textContent = window.Android ? ('v' + window.Android.appVersion()) : 'v1.1.2（浏览器测试）';
+    if (ver) ver.textContent = window.Android ? ('v' + window.Android.appVersion()) : 'v1.1.3（浏览器测试）';
   } catch (e) {}
   renderModelsList();
   try { renderDiag(); } catch (e) {}
